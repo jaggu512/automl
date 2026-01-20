@@ -1,19 +1,12 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import time
-import matplotlib.pyplot as plt
-import seaborn as sns
+import os
 
-# --- IMPORTS FOR CUSTOM AUTOML (SAFE MODE) ---
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from sklearn.impute import SimpleImputer
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.linear_model import LogisticRegression, LinearRegression
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.svm import SVC, SVR
-from sklearn.metrics import accuracy_score, r2_score
+# --- PYCARET IMPORTS ---
+# We import both modules to handle Classification and Regression dynamically
+from pycaret.classification import setup as setup_clf, compare_models as compare_clf, pull as pull_clf, save_model as save_clf, load_model as load_clf
+from pycaret.regression import setup as setup_reg, compare_models as compare_reg, pull as pull_reg, save_model as save_reg, load_model as load_reg
 
 # ===================================================
 # 1. PAGE CONFIGURATION
@@ -26,7 +19,7 @@ st.set_page_config(
 )
 
 # ===================================================
-# 2. GLOBAL STYLING (The "Professional Look")
+# 2. GLOBAL STYLING (Professional Look)
 # ===================================================
 st.markdown("""
 <style>
@@ -81,17 +74,6 @@ div[data-testid="stMetric"] {
     font-weight: 600;
     margin-bottom: 5px;
 }
-.inactive-menu {
-    padding: 12px;
-    border-radius: 8px;
-    text-align: left;
-    color: #1F2937;
-    cursor: pointer;
-    margin-bottom: 5px;
-}
-.inactive-menu:hover {
-    background-color: #DBEAFE;
-}
 </style>
 """, unsafe_allow_html=True)
 
@@ -107,7 +89,6 @@ defaults = {
     "task_type": None,
     "setup_done": False,
     "best_model": None,
-    "best_model_name": None,
     "leaderboard": None
 }
 
@@ -116,83 +97,38 @@ for key, value in defaults.items():
         st.session_state[key] = value
 
 # ===================================================
-# 4. HELPER FUNCTIONS (The "Custom Engine")
+# 4. HELPER FUNCTIONS (The "PyCaret Engine")
 # ===================================================
 def detect_task(df, target):
-    """Decides Classification vs Regression"""
+    """Smartly decides if the problem is Classification or Regression"""
     if df[target].nunique() < 20 or df[target].dtype == 'object':
         return "Classification"
     return "Regression"
 
-def run_custom_automl(df, target, task):
-    """Runs the training loop safely using Scikit-learn"""
-    # 1. Preprocessing
-    df = df.copy()
-    imputer = SimpleImputer(strategy='mean' if task == 'Regression' else 'most_frequent')
-    le = LabelEncoder()
+def run_pycaret_automl(df, target, task):
+    """Runs PyCaret AutoML based on the task type"""
     
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            df[col] = le.fit_transform(df[col].astype(str))
-            
-    X = df.drop(columns=[target])
-    y = df[target]
-    
-    # Handle missing values
-    X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    # 2. Model Selection
     if task == "Classification":
-        models = {
-            "Logistic Regression": LogisticRegression(max_iter=500),
-            "Decision Tree": DecisionTreeClassifier(),
-            "Random Forest": RandomForestClassifier(),
-            "SVM": SVC()
-        }
-        metric = accuracy_score
-        metric_name = "Accuracy"
+        # 1. Setup (Preprocessing)
+        s = setup_clf(data=df, target=target, verbose=False, html=False, session_id=123)
+        # 2. Compare Models (Training)
+        best_model = compare_clf()
+        # 3. Get Results
+        leaderboard = pull_clf()
+        # 4. Save
+        save_clf(best_model, 'best_model_pipeline')
+        
     else:
-        models = {
-            "Linear Regression": LinearRegression(),
-            "Decision Tree": DecisionTreeRegressor(),
-            "Random Forest": RandomForestRegressor(),
-            "SVR": SVR()
-        }
-        metric = r2_score
-        metric_name = "R2 Score"
+        # 1. Setup (Preprocessing)
+        s = setup_reg(data=df, target=target, verbose=False, html=False, session_id=123)
+        # 2. Compare Models (Training)
+        best_model = compare_reg()
+        # 3. Get Results
+        leaderboard = pull_reg()
+        # 4. Save
+        save_reg(best_model, 'best_model_pipeline')
         
-    # 3. Training Loop
-    results = []
-    trained_models = {}
-    
-    progress_bar = st.progress(0)
-    status = st.empty()
-    
-    total = len(models)
-    for i, (name, model) in enumerate(models.items()):
-        status.write(f"⚙️ Training {name}...")
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        score = metric(y_test, y_pred)
-        
-        results.append({"Model": name, metric_name: score})
-        trained_models[name] = model
-        progress_bar.progress(int((i+1)/total * 100))
-        time.sleep(0.3)
-        
-    status.write("✅ Training Complete!")
-    time.sleep(1)
-    status.empty()
-    progress_bar.empty()
-    
-    # 4. Finalize
-    leaderboard = pd.DataFrame(results).sort_values(by=metric_name, ascending=False)
-    best_name = leaderboard.iloc[0]['Model']
-    best_model = trained_models[best_name]
-    
-    return leaderboard, best_model, best_name
+    return leaderboard, best_model
 
 # ===================================================
 # 5. SIDEBAR NAVIGATION
@@ -234,8 +170,8 @@ with st.sidebar:
 # ===================================================
 main_page = st.session_state.page
 
+# --- PAGE 1: HOME ---
 if main_page == "Home":
-    # --- HEADER ---
     st.markdown('<div class="gradient-header">🏠 Welcome to Intelligent AutoML</div>', unsafe_allow_html=True)
     
     col1, col2 = st.columns([1, 1])
@@ -273,14 +209,13 @@ if main_page == "Home":
             Tell the system what you want to solve.<br><br>
             <b>2. Connect Data</b><br>
             Upload a CSV or get a recommendation.<br><br>
-            <b>3. Auto-Train</b><br>
-            The system trains multiple models automatically.<br><br>
+            <b>3. Auto-Train (PyCaret)</b><br>
+            The system uses PyCaret to train 15+ models automatically.<br><br>
             <b>4. Get Results</b><br>
             View the leaderboard and download the report.
         </div>
         """, unsafe_allow_html=True)
 
-    # Dataset Recommendation Logic (If selected)
     if st.session_state.get('recommendation_mode'):
         st.markdown("---")
         st.subheader("🤖 AI Recommendations")
@@ -292,13 +227,13 @@ if main_page == "Home":
         with c3:
             st.button("🩺 Heart Health")
 
+# --- PAGE 2: DATA SETUP ---
 elif main_page == "Data Setup":
     st.markdown('<div class="gradient-header">📂 Data Setup</div>', unsafe_allow_html=True)
     
     if not st.session_state.project_title:
         st.warning("⚠️ Please define your project in 'Home' first.")
     else:
-        # Upload Section
         st.markdown(f"**Project:** {st.session_state.project_title}")
         
         uploaded_file = st.file_uploader("Upload CSV Dataset", type="csv")
@@ -307,11 +242,9 @@ elif main_page == "Data Setup":
             st.session_state.df = pd.read_csv(uploaded_file)
             st.success("✅ Dataset Uploaded!")
             
-        # Data Preview & Config
         if st.session_state.df is not None:
             st.markdown("---")
             
-            # Metric Cards
             m1, m2, m3 = st.columns(3)
             m1.metric("Total Rows", st.session_state.df.shape[0])
             m2.metric("Total Columns", st.session_state.df.shape[1])
@@ -336,6 +269,7 @@ elif main_page == "Data Setup":
                     st.info(f"Detected Task: **{task}**")
                     st.session_state.setup_done = True
 
+# --- PAGE 3: AUTOML & RESULTS ---
 elif main_page == "AutoML & Results":
     st.markdown('<div class="gradient-header">🚀 AutoML & Results</div>', unsafe_allow_html=True)
     
@@ -349,21 +283,20 @@ elif main_page == "AutoML & Results":
             st.write(f"Target: **{st.session_state.target}**")
             st.write(f"Task: **{st.session_state.task_type}**")
             
-            if st.button("🚀 Start AutoML Training", type="primary"):
-                leaderboard, best_model, best_name = run_custom_automl(
-                    st.session_state.df, 
-                    st.session_state.target, 
-                    st.session_state.task_type
-                )
-                st.session_state.leaderboard = leaderboard
-                st.session_state.best_model = best_model
-                st.session_state.best_model_name = best_name
-                st.rerun()
+            if st.button("🚀 Start PyCaret AutoML", type="primary"):
+                with st.spinner("🤖 PyCaret is analyzing your data... (Preprocessing -> Training -> Comparison)"):
+                    leaderboard, best_model = run_pycaret_automl(
+                        st.session_state.df, 
+                        st.session_state.target, 
+                        st.session_state.task_type
+                    )
+                    st.session_state.leaderboard = leaderboard
+                    st.session_state.best_model = best_model
+                    st.rerun()
                 
         with col2:
-            st.info("System is ready to train multiple models and find the best one.")
+            st.info("System will initialize PyCaret to train multiple models automatically.")
             
-        # Results Section
         if st.session_state.leaderboard is not None:
             st.markdown("---")
             st.subheader("🏆 Model Leaderboard")
@@ -371,17 +304,15 @@ elif main_page == "AutoML & Results":
             # Highlight best model
             st.dataframe(st.session_state.leaderboard.style.highlight_max(axis=0, color='#d1fae5'), use_container_width=True)
             
-            st.success(f"🥇 Best Model Identified: **{st.session_state.best_model_name}**")
+            best_model_name = str(st.session_state.best_model)
+            st.success(f"🥇 Best Model Identified: **{best_model_name}**")
             
-            # Visuals
-            st.markdown("### 📊 Performance Visualization")
-            fig, ax = plt.subplots(figsize=(10, 4))
-            metric_col = st.session_state.leaderboard.columns[1]
-            sns.barplot(data=st.session_state.leaderboard, x=metric_col, y='Model', palette='viridis', ax=ax)
-            st.pyplot(fig)
-            
-            # Report
             st.markdown("### 📄 Final Report")
+            
+            # Helper to safely get accuracy or R2
+            metric_col = st.session_state.leaderboard.columns[1] # Usually Accuracy or MAE
+            best_score = st.session_state.leaderboard.iloc[0,1]
+            
             report = f"""
             PROJECT REPORT: {st.session_state.project_title}
             ------------------------------------------------
@@ -390,7 +321,10 @@ elif main_page == "AutoML & Results":
             Target: {st.session_state.target}
             Task: {st.session_state.task_type}
             
-            WINNING MODEL: {st.session_state.best_model_name}
-            SCORE: {st.session_state.leaderboard.iloc[0,1]:.4f}
+            WINNING MODEL: {best_model_name}
+            SCORE ({metric_col}): {best_score:.4f}
+            
+            LEADERBOARD (Top 5):
+            {st.session_state.leaderboard.head(5).to_string()}
             """
             st.download_button("Download Report", report, "report.txt")
