@@ -1,47 +1,35 @@
-import streamlit as st
-import pandas as pd
-import numpy as np
 import time
-import matplotlib.pyplot as plt
-import seaborn as sns
 
-# --- IMPORTS FOR CUSTOM AUTOML (SAFE MODE) ---
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
-from sklearn.impute import SimpleImputer
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.linear_model import LogisticRegression, LinearRegression
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.svm import SVC, SVR
-from sklearn.metrics import accuracy_score, r2_score
+import pandas as pd
+import streamlit as st
 
-# ===================================================
-# 1. PAGE CONFIGURATION
-# ===================================================
+from ml_engine.automl import run_automl
+from ml_engine.evaluation_utils import summarize_leaderboard
+from ml_engine.kaggle_engine import download_dataset, recommend_datasets
+from ml_engine.model_selection import get_top3, save_model_pipeline
+from ml_engine.prediction_engine import predict
+from ml_engine.utils import detect_task_type
+
+
 st.set_page_config(
-    page_title="Learnset | Intelligent AutoML",
+    page_title="Learnset | Integrated AutoML",
     page_icon="🔬",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="expanded",
 )
 
-# ===================================================
-# 2. GLOBAL STYLING (The "Professional Look")
-# ===================================================
-st.markdown("""
+st.markdown(
+    """
 <style>
-/* Main Background */
 .stApp {
     background-color: #F8FAFC;
 }
 
-/* Sidebar Styling */
 [data-testid="stSidebar"] {
     background-color: #F0F9FF;
     border-right: 1px solid #E2E8F0;
 }
 
-/* Gradient Header Card */
 .gradient-header {
     background: linear-gradient(90deg, #3B82F6, #2563EB);
     padding: 30px;
@@ -54,7 +42,6 @@ st.markdown("""
     box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
 }
 
-/* Metric Cards */
 div[data-testid="stMetric"] {
     background-color: white;
     padding: 15px;
@@ -63,7 +50,6 @@ div[data-testid="stMetric"] {
     box-shadow: 0 2px 4px rgba(0,0,0,0.05);
 }
 
-/* Custom Buttons */
 .stButton>button {
     width: 100%;
     border-radius: 8px;
@@ -71,7 +57,6 @@ div[data-testid="stMetric"] {
     font-weight: 600;
 }
 
-/* Active Menu Item Styling */
 .active-menu {
     background-color: #2563EB;
     color: white;
@@ -81,23 +66,43 @@ div[data-testid="stMetric"] {
     font-weight: 600;
     margin-bottom: 5px;
 }
-.inactive-menu {
-    padding: 12px;
-    border-radius: 8px;
-    text-align: left;
-    color: #1F2937;
-    cursor: pointer;
-    margin-bottom: 5px;
-}
-.inactive-menu:hover {
-    background-color: #DBEAFE;
-}
 </style>
-""", unsafe_allow_html=True)
+""",
+    unsafe_allow_html=True,
+)
 
-# ===================================================
-# 3. SESSION STATE MANAGEMENT
-# ===================================================
+
+def parse_input_value(raw_value):
+    value = str(raw_value).strip()
+    if value == "":
+        return value
+
+    lowered = value.lower()
+    if lowered in {"true", "false"}:
+        return lowered == "true"
+
+    try:
+        if "." in value:
+            return float(value)
+        return int(value)
+    except ValueError:
+        return value
+
+
+def metric_display_value(metric_value):
+    if metric_value is None:
+        return "N/A"
+    return f"{metric_value:.4f}"
+
+
+def reset_training_outputs():
+    st.session_state.best_model = None
+    st.session_state.leaderboard = None
+    st.session_state.top3_models = None
+    st.session_state.summary_metrics = None
+    st.session_state.model_path = None
+
+
 defaults = {
     "page": "Home",
     "project_title": "",
@@ -105,292 +110,320 @@ defaults = {
     "df": None,
     "target": None,
     "task_type": None,
+    "data_source": "Upload CSV",
     "setup_done": False,
     "best_model": None,
-    "best_model_name": None,
-    "leaderboard": None
+    "leaderboard": None,
+    "top3_models": None,
+    "summary_metrics": None,
+    "model_path": None,
+    "kaggle_results": None,
+    "prediction_result": None,
 }
 
 for key, value in defaults.items():
     if key not in st.session_state:
         st.session_state[key] = value
 
-# ===================================================
-# 4. HELPER FUNCTIONS (The "Custom Engine")
-# ===================================================
-def detect_task(df, target):
-    """Decides Classification vs Regression"""
-    if df[target].nunique() < 20 or df[target].dtype == 'object':
-        return "Classification"
-    return "Regression"
 
-def run_custom_automl(df, target, task):
-    """Runs the training loop safely using Scikit-learn"""
-    # 1. Preprocessing
-    df = df.copy()
-    imputer = SimpleImputer(strategy='mean' if task == 'Regression' else 'most_frequent')
-    le = LabelEncoder()
-    
-    for col in df.columns:
-        if df[col].dtype == 'object':
-            df[col] = le.fit_transform(df[col].astype(str))
-            
-    X = df.drop(columns=[target])
-    y = df[target]
-    
-    # Handle missing values
-    X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
-    
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    # 2. Model Selection
-    if task == "Classification":
-        models = {
-            "Logistic Regression": LogisticRegression(max_iter=500),
-            "Decision Tree": DecisionTreeClassifier(),
-            "Random Forest": RandomForestClassifier(),
-            "SVM": SVC()
-        }
-        metric = accuracy_score
-        metric_name = "Accuracy"
-    else:
-        models = {
-            "Linear Regression": LinearRegression(),
-            "Decision Tree": DecisionTreeRegressor(),
-            "Random Forest": RandomForestRegressor(),
-            "SVR": SVR()
-        }
-        metric = r2_score
-        metric_name = "R2 Score"
-        
-    # 3. Training Loop
-    results = []
-    trained_models = {}
-    
-    progress_bar = st.progress(0)
-    status = st.empty()
-    
-    total = len(models)
-    for i, (name, model) in enumerate(models.items()):
-        status.write(f"⚙️ Training {name}...")
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_test)
-        score = metric(y_test, y_pred)
-        
-        results.append({"Model": name, metric_name: score})
-        trained_models[name] = model
-        progress_bar.progress(int((i+1)/total * 100))
-        time.sleep(0.3)
-        
-    status.write("✅ Training Complete!")
-    time.sleep(1)
-    status.empty()
-    progress_bar.empty()
-    
-    # 4. Finalize
-    leaderboard = pd.DataFrame(results).sort_values(by=metric_name, ascending=False)
-    best_name = leaderboard.iloc[0]['Model']
-    best_model = trained_models[best_name]
-    
-    return leaderboard, best_model, best_name
-
-# ===================================================
-# 5. SIDEBAR NAVIGATION
-# ===================================================
 with st.sidebar:
     st.markdown("## 🔬 **Learnset**")
-    st.caption("Intelligent AutoML System")
+    st.caption("Integrated AutoML System")
     st.markdown("---")
-    
-    # Custom Menu Buttons
-    pages = ["Home", "Data Setup", "AutoML & Results"]
-    
-    for p in pages:
-        if st.session_state.page == p:
-            st.markdown(f'<div class="active-menu">{p}</div>', unsafe_allow_html=True)
+
+    pages = ["Home", "Data Setup", "AutoML & Results", "Prediction & Evaluation"]
+    for page in pages:
+        if st.session_state.page == page:
+            st.markdown(f'<div class="active-menu">{page}</div>', unsafe_allow_html=True)
         else:
-            if st.button(p, key=f"nav_{p}", use_container_width=True):
-                st.session_state.page = p
+            if st.button(page, key=f"nav_{page}", width="stretch"):
+                st.session_state.page = page
                 st.rerun()
-                
+
     st.markdown("---")
-    st.markdown("### 📊 System Status")
-    
-    # Status Indicators
+    st.markdown("### System Status")
     st.write("**Dataset:**")
     if st.session_state.df is not None:
         st.success("Loaded")
     else:
         st.warning("Not Loaded")
-        
+
     st.write("**Training:**")
-    if st.session_state.best_model:
+    if st.session_state.best_model is not None:
         st.success("Complete")
     else:
         st.info("Pending")
 
-# ===================================================
-# 6. MAIN CONTENT
-# ===================================================
+
 main_page = st.session_state.page
 
 if main_page == "Home":
-    # --- HEADER ---
-    st.markdown('<div class="gradient-header">🏠 Welcome to Intelligent AutoML</div>', unsafe_allow_html=True)
-    
+    st.markdown('<div class="gradient-header">Welcome to Integrated AutoML</div>', unsafe_allow_html=True)
+
     col1, col2 = st.columns([1, 1])
-    
     with col1:
-        st.markdown("### 📝 Define Your Problem")
-        st.info("Start by telling us about your project. The AI will guide you based on this.")
-        
+        st.markdown("### Define Your Problem")
+        st.info("Start with project details, then load data and train automatically.")
+
         with st.form("project_form"):
-            title = st.text_input("Project Title", value=st.session_state.project_title, placeholder="e.g. Student Marks Prediction")
-            desc = st.text_area("Problem Description", value=st.session_state.project_desc, placeholder="Describe what you want to predict...", height=150)
-            
+            title = st.text_input(
+                "Project Title",
+                value=st.session_state.project_title,
+                placeholder="e.g. Student Marks Prediction",
+            )
+            desc = st.text_area(
+                "Problem Description",
+                value=st.session_state.project_desc,
+                placeholder="Describe what you want to predict...",
+                height=150,
+            )
+
             st.write("---")
-            st.write("**Dataset Availability**")
-            data_source = st.radio("Choose option:", ["I have a dataset", "Suggest a dataset"], horizontal=True)
-            
+            data_source = st.radio(
+                "Dataset Availability",
+                ["Upload CSV", "Kaggle Recommendation"],
+                horizontal=True,
+            )
+
             submitted = st.form_submit_button("Save & Continue", type="primary")
-            
             if submitted:
                 if title and desc:
                     st.session_state.project_title = title
                     st.session_state.project_desc = desc
-                    st.success("✅ Project initialized! Go to 'Data Setup' next.")
-                    
-                    if data_source == "Suggest a dataset":
-                        st.session_state.recommendation_mode = True
+                    st.session_state.data_source = data_source
+                    st.success("Project initialized. Move to Data Setup.")
+                    time.sleep(1)
+                    st.session_state.page = "Data Setup"
+                    st.rerun()
                 else:
-                    st.error("Please fill in the details.")
-    
+                    st.error("Please fill in all fields.")
+
     with col2:
-        st.markdown("### 💡 How It Works")
-        st.markdown("""
+        st.markdown("### Workflow")
+        st.markdown(
+            """
         <div style="background:white; padding:20px; border-radius:10px; border:1px solid #E2E8F0;">
             <b>1. Define Problem</b><br>
-            Tell the system what you want to solve.<br><br>
+            Set title and objective.<br><br>
             <b>2. Connect Data</b><br>
-            Upload a CSV or get a recommendation.<br><br>
-            <b>3. Auto-Train</b><br>
-            The system trains multiple models automatically.<br><br>
-            <b>4. Get Results</b><br>
-            View the leaderboard and download the report.
+            Upload CSV or use Kaggle recommendations.<br><br>
+            <b>3. Train Automatically</b><br>
+            PyCaret compares and tunes models.<br><br>
+            <b>4. Predict and Evaluate</b><br>
+            Use saved model and standardized metrics.
         </div>
-        """, unsafe_allow_html=True)
-
-    # Dataset Recommendation Logic (If selected)
-    if st.session_state.get('recommendation_mode'):
-        st.markdown("---")
-        st.subheader("🤖 AI Recommendations")
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            st.button("🏠 Housing Data")
-        with c2:
-            st.button("🎓 Student Marks")
-        with c3:
-            st.button("🩺 Heart Health")
+        """,
+            unsafe_allow_html=True,
+        )
 
 elif main_page == "Data Setup":
-    st.markdown('<div class="gradient-header">📂 Data Setup</div>', unsafe_allow_html=True)
-    
+    st.markdown('<div class="gradient-header">Data Setup</div>', unsafe_allow_html=True)
+
     if not st.session_state.project_title:
-        st.warning("⚠️ Please define your project in 'Home' first.")
+        st.warning("Please define your project in Home first.")
     else:
-        # Upload Section
         st.markdown(f"**Project:** {st.session_state.project_title}")
-        
-        uploaded_file = st.file_uploader("Upload CSV Dataset", type="csv")
-        
-        if uploaded_file:
-            st.session_state.df = pd.read_csv(uploaded_file)
-            st.success("✅ Dataset Uploaded!")
-            
-        # Data Preview & Config
+
+        if st.session_state.get("data_source", "Upload CSV") == "Upload CSV":
+            uploaded_file = st.file_uploader("Upload CSV Dataset", type="csv")
+            if uploaded_file is not None:
+                st.session_state.df = pd.read_csv(uploaded_file)
+                reset_training_outputs()
+                st.success("Dataset uploaded.")
+        else:
+            st.subheader("Kaggle Dataset Recommendation")
+            task_select = st.selectbox("Select Task Type", ["Classification", "Regression"])
+            if st.button("Get Kaggle Datasets"):
+                try:
+                    st.session_state.kaggle_results = recommend_datasets(task_select)
+                except Exception as exc:
+                    st.error(f"Unable to fetch Kaggle datasets: {exc}")
+
+            if st.session_state.kaggle_results:
+                for ds in st.session_state.kaggle_results:
+                    col1, col2 = st.columns([4, 1])
+                    col1.write(ds["title"])
+                    if col2.button("Download", key=ds["ref"]):
+                        try:
+                            path = download_dataset(ds["ref"])
+                            st.success(f"Downloaded to {path}")
+                        except Exception as exc:
+                            st.error(f"Download failed: {exc}")
+
         if st.session_state.df is not None:
             st.markdown("---")
-            
-            # Metric Cards
             m1, m2, m3 = st.columns(3)
             m1.metric("Total Rows", st.session_state.df.shape[0])
             m2.metric("Total Columns", st.session_state.df.shape[1])
-            m3.metric("Missing Values", st.session_state.df.isnull().sum().sum())
-            
-            st.subheader("👀 Data Preview")
-            st.dataframe(st.session_state.df.head(), use_container_width=True)
-            
+            m3.metric("Missing Values", int(st.session_state.df.isnull().sum().sum()))
+
+            st.subheader("Data Preview")
+            st.dataframe(st.session_state.df.head(), width="stretch")
+
             st.markdown("---")
-            st.subheader("🎯 Target Configuration")
-            
+            st.subheader("Target Configuration")
             col_target, col_info = st.columns(2)
-            
+
             with col_target:
-                target = st.selectbox("Select Target Column", st.session_state.df.columns)
-                st.session_state.target = target
-            
+                selected_target = st.selectbox("Select Target Column", st.session_state.df.columns)
+                st.session_state.target = selected_target
+
             with col_info:
-                if target:
-                    task = detect_task(st.session_state.df, target)
-                    st.session_state.task_type = task
-                    st.info(f"Detected Task: **{task}**")
-                    st.session_state.setup_done = True
+                if selected_target:
+                    try:
+                        task = detect_task_type(st.session_state.df, selected_target)
+                        st.session_state.task_type = task
+                        st.session_state.setup_done = True
+                        st.info(f"Detected Task: **{task}**")
+                    except Exception as exc:
+                        st.session_state.setup_done = False
+                        st.error(f"Target validation failed: {exc}")
+
+                    if st.button("Proceed to Training", type="primary"):
+                        st.session_state.page = "AutoML & Results"
+                        st.rerun()
 
 elif main_page == "AutoML & Results":
-    st.markdown('<div class="gradient-header">🚀 AutoML & Results</div>', unsafe_allow_html=True)
-    
+    st.markdown('<div class="gradient-header">AutoML & Results</div>', unsafe_allow_html=True)
+
     if not st.session_state.setup_done:
-        st.warning("⚠️ Please upload data and select a target in 'Data Setup' first.")
+        st.warning("Please upload data and select a valid target in Data Setup first.")
     else:
         col1, col2 = st.columns([3, 1])
-        
+
         with col1:
-            st.subheader("⚙️ Training Configuration")
+            st.subheader("Training Configuration")
             st.write(f"Target: **{st.session_state.target}**")
             st.write(f"Task: **{st.session_state.task_type}**")
-            
-            if st.button("🚀 Start AutoML Training", type="primary"):
-                leaderboard, best_model, best_name = run_custom_automl(
-                    st.session_state.df, 
-                    st.session_state.target, 
-                    st.session_state.task_type
-                )
-                st.session_state.leaderboard = leaderboard
-                st.session_state.best_model = best_model
-                st.session_state.best_model_name = best_name
-                st.rerun()
-                
+
+            if st.button("Start AutoML", type="primary"):
+                with st.spinner("PyCaret is training and tuning models..."):
+                    try:
+                        best_model, leaderboard = run_automl(
+                            st.session_state.df,
+                            st.session_state.target,
+                            st.session_state.task_type,
+                        )
+                        model_path = save_model_pipeline(
+                            best_model,
+                            st.session_state.task_type,
+                            user_id="default",
+                        )
+
+                        top3_models = get_top3(leaderboard)
+                        summary_metrics = summarize_leaderboard(leaderboard, st.session_state.task_type)
+
+                        st.session_state.best_model = best_model
+                        st.session_state.leaderboard = leaderboard
+                        st.session_state.top3_models = top3_models
+                        st.session_state.summary_metrics = summary_metrics
+                        st.session_state.model_path = model_path
+                        st.success("Training completed and model saved.")
+                    except Exception as exc:
+                        st.error(f"AutoML failed: {exc}")
+
         with col2:
-            st.info("System is ready to train multiple models and find the best one.")
-            
-        # Results Section
+            st.info("This will run preprocessing, model comparison, and hyperparameter tuning.")
+
         if st.session_state.leaderboard is not None:
             st.markdown("---")
-            st.subheader("🏆 Model Leaderboard")
-            
-            # Highlight best model
-            st.dataframe(st.session_state.leaderboard.style.highlight_max(axis=0, color='#d1fae5'), use_container_width=True)
-            
-            st.success(f"🥇 Best Model Identified: **{st.session_state.best_model_name}**")
-            
-            # Visuals
-            st.markdown("### 📊 Performance Visualization")
-            fig, ax = plt.subplots(figsize=(10, 4))
-            metric_col = st.session_state.leaderboard.columns[1]
-            sns.barplot(data=st.session_state.leaderboard, x=metric_col, y='Model', palette='viridis', ax=ax)
-            st.pyplot(fig)
-            
-            # Report
-            st.markdown("### 📄 Final Report")
+            st.subheader("Model Leaderboard (Top 5)")
+            st.dataframe(st.session_state.leaderboard.head(5), width="stretch")
+
+            st.markdown("### Top 3 Models")
+            st.dataframe(st.session_state.top3_models, width="stretch")
+
+            st.markdown("### Standardized Summary")
+            metrics = st.session_state.summary_metrics or {}
+            if metrics:
+                columns = st.columns(len(metrics))
+                for idx, (metric_name, metric_value) in enumerate(metrics.items()):
+                    columns[idx].metric(metric_name, metric_display_value(metric_value))
+            else:
+                st.info("No summary metrics available.")
+
+            best_model_name = str(st.session_state.best_model)
+            st.success(f"Best Model: **{best_model_name}**")
+            if st.session_state.model_path:
+                st.caption(f"Saved model path: `{st.session_state.model_path}`")
+
             report = f"""
-            PROJECT REPORT: {st.session_state.project_title}
-            ------------------------------------------------
-            Problem: {st.session_state.project_desc}
-            Dataset Rows: {st.session_state.df.shape[0]}
-            Target: {st.session_state.target}
-            Task: {st.session_state.task_type}
-            
-            WINNING MODEL: {st.session_state.best_model_name}
-            SCORE: {st.session_state.leaderboard.iloc[0,1]:.4f}
-            """
+PROJECT REPORT: {st.session_state.project_title}
+------------------------------------------------
+Problem: {st.session_state.project_desc}
+Dataset Rows: {st.session_state.df.shape[0]}
+Target: {st.session_state.target}
+Task: {st.session_state.task_type}
+
+WINNING MODEL: {best_model_name}
+SUMMARY METRICS: {st.session_state.summary_metrics}
+
+LEADERBOARD (Top 5):
+{st.session_state.leaderboard.head(5).to_string()}
+"""
             st.download_button("Download Report", report, "report.txt")
+
+elif main_page == "Prediction & Evaluation":
+    st.markdown('<div class="gradient-header">Prediction & Evaluation</div>', unsafe_allow_html=True)
+
+    if st.session_state.df is None or st.session_state.target is None:
+        st.warning("Load a dataset and choose a target in Data Setup first.")
+    else:
+        st.subheader("Prediction")
+        if st.session_state.best_model is None:
+            st.warning("Train a model in this session before running prediction.")
+
+        feature_columns = [
+            col for col in st.session_state.df.columns if col != st.session_state.target
+        ]
+
+        with st.form("prediction_form"):
+            user_id = st.text_input("User ID", value="default")
+            st.caption("Provide input values for each feature.")
+
+            input_payload = {}
+            for feature in feature_columns:
+                default_value = ""
+                if not st.session_state.df.empty:
+                    sample_value = st.session_state.df.iloc[0][feature]
+                    if pd.notna(sample_value):
+                        default_value = str(sample_value)
+                raw_value = st.text_input(feature, value=default_value, key=f"pred_{feature}")
+                if raw_value != "":
+                    input_payload[feature] = parse_input_value(raw_value)
+
+            submit_prediction = st.form_submit_button("Run Prediction", type="primary")
+
+        if submit_prediction:
+            try:
+                if st.session_state.best_model is None:
+                    raise ValueError("No trained model in current session. Run AutoML first.")
+                prediction = predict(user_id=user_id, input_data=input_payload)
+                st.session_state.prediction_result = prediction
+                st.success(f"Prediction: **{prediction}**")
+                st.caption(f"Model path: `models/user_{user_id}/best_model.pkl`")
+            except Exception as exc:
+                st.error(f"Prediction failed: {exc}")
+
+        st.markdown("---")
+        st.subheader("Evaluation Summary")
+
+        if st.session_state.leaderboard is not None and st.session_state.task_type:
+            if st.button("Refresh Summary Metrics"):
+                try:
+                    st.session_state.summary_metrics = summarize_leaderboard(
+                        st.session_state.leaderboard,
+                        st.session_state.task_type,
+                    )
+                except Exception as exc:
+                    st.error(f"Unable to refresh summary: {exc}")
+
+            if st.session_state.summary_metrics:
+                metrics = st.session_state.summary_metrics
+                metric_cols = st.columns(len(metrics))
+                for idx, (metric_name, metric_value) in enumerate(metrics.items()):
+                    metric_cols[idx].metric(metric_name, metric_display_value(metric_value))
+            else:
+                st.info("Summary metrics are not available yet. Train a model first.")
+        else:
+            st.info("Run AutoML first to generate leaderboard-based evaluation metrics.")
