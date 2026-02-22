@@ -1,5 +1,7 @@
-streamlit
-pandas
-pycaret
+streamlit==1.32.0
+pandas==2.0.3
+numpy==1.24.4
+scikit-learn==1.3.2
+pycaret==3.3.2
 fastapi
 uvicorn
