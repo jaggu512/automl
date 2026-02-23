@@ -1,4 +1,11 @@
 streamlit
+pandas
 pycaret
 fastapi
 uvicorn
+sqlalchemy
+pymysql
+passlib[bcrypt]
+python-jose[cryptography]
+cryptography
+requests

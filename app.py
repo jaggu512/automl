@@ -1,6 +1,8 @@
 import time
+import os
 
 import pandas as pd
+import requests
 import streamlit as st
 
 from ml_engine.automl import run_automl
@@ -9,6 +11,9 @@ from ml_engine.kaggle_engine import download_dataset, recommend_datasets
 from ml_engine.model_selection import get_top3, save_model_pipeline
 from ml_engine.prediction_engine import predict
 from ml_engine.utils import detect_task_type
+
+
+API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 
 
 st.set_page_config(
@@ -103,8 +108,36 @@ def reset_training_outputs():
     st.session_state.model_path = None
 
 
+def backend_register(username, password):
+    response = requests.post(
+        f"{API_BASE_URL}/auth/register",
+        json={"username": username, "password": password},
+        timeout=15,
+    )
+    return response
+
+
+def backend_login(username, password):
+    response = requests.post(
+        f"{API_BASE_URL}/auth/login",
+        json={"username": username, "password": password},
+        timeout=15,
+    )
+    return response
+
+
+def _response_detail(response):
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            return body.get("detail", body)
+        return body
+    except Exception:
+        return response.text
+
+
 defaults = {
-    "page": "Home",
+    "page": "Login",
     "project_title": "",
     "project_desc": "",
     "df": None,
@@ -119,6 +152,9 @@ defaults = {
     "model_path": None,
     "kaggle_results": None,
     "prediction_result": None,
+    "authenticated": False,
+    "auth_username": None,
+    "access_token": None,
 }
 
 for key, value in defaults.items():
@@ -131,14 +167,29 @@ with st.sidebar:
     st.caption("Integrated AutoML System")
     st.markdown("---")
 
-    pages = ["Home", "Data Setup", "AutoML & Results", "Prediction & Evaluation"]
+    pages = ["Login", "Home", "Data Setup", "AutoML & Results", "Prediction & Evaluation"]
     for page in pages:
+        if not st.session_state.authenticated and page != "Login":
+            continue
         if st.session_state.page == page:
             st.markdown(f'<div class="active-menu">{page}</div>', unsafe_allow_html=True)
         else:
             if st.button(page, key=f"nav_{page}", width="stretch"):
                 st.session_state.page = page
                 st.rerun()
+
+    st.markdown("---")
+    st.markdown("### Account")
+    if st.session_state.authenticated:
+        st.success(f"Signed in as `{st.session_state.auth_username}`")
+        if st.button("Logout", width="stretch"):
+            st.session_state.authenticated = False
+            st.session_state.auth_username = None
+            st.session_state.access_token = None
+            st.session_state.page = "Login"
+            st.rerun()
+    else:
+        st.info("Not signed in")
 
     st.markdown("---")
     st.markdown("### System Status")
@@ -157,7 +208,63 @@ with st.sidebar:
 
 main_page = st.session_state.page
 
-if main_page == "Home":
+if not st.session_state.authenticated and main_page != "Login":
+    st.session_state.page = "Login"
+    st.warning("Please login to continue.")
+    st.stop()
+
+if main_page == "Login":
+    st.markdown('<div class="gradient-header">Login</div>', unsafe_allow_html=True)
+
+    tab_login, tab_register = st.tabs(["Login", "Register"])
+
+    with tab_login:
+        with st.form("login_form"):
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input("Password", type="password", key="login_password")
+            login_submit = st.form_submit_button("Sign In", type="primary")
+
+        if login_submit:
+            if not username or not password:
+                st.error("Username and password are required.")
+            else:
+                try:
+                    response = backend_login(username.strip(), password)
+                    if response.status_code == 200:
+                        body = response.json()
+                        st.session_state.authenticated = True
+                        st.session_state.auth_username = username.strip()
+                        st.session_state.access_token = body.get("access_token")
+                        st.session_state.page = "Home"
+                        st.success("Login successful.")
+                        st.rerun()
+                    else:
+                        detail = _response_detail(response)
+                        st.error(f"Login failed: {detail}")
+                except Exception as exc:
+                    st.error(f"Unable to reach backend API at {API_BASE_URL}: {exc}")
+
+    with tab_register:
+        with st.form("register_form"):
+            username = st.text_input("Username", key="register_username")
+            password = st.text_input("Password", type="password", key="register_password")
+            register_submit = st.form_submit_button("Create Account")
+
+        if register_submit:
+            if not username or not password:
+                st.error("Username and password are required.")
+            else:
+                try:
+                    response = backend_register(username.strip(), password)
+                    if response.status_code in {200, 201}:
+                        st.success("User registered. Please login now.")
+                    else:
+                        detail = _response_detail(response)
+                        st.error(f"Registration failed: {detail}")
+                except Exception as exc:
+                    st.error(f"Unable to reach backend API at {API_BASE_URL}: {exc}")
+
+elif main_page == "Home":
     st.markdown('<div class="gradient-header">Welcome to Integrated AutoML</div>', unsafe_allow_html=True)
 
     col1, col2 = st.columns([1, 1])
